@@ -73,19 +73,18 @@ class Calibrator:
         print(f"Calculated {len(self.ipds)} valid IPDs after filtering idle gaps > {max_idle_gap}s.")
 
     def distribution_fitting(self, n_components=3):
-        """Fits a 3-component Gaussian Mixture Model (GMM) and calculates summary statistics."""
+        """Fits a 3-component GMM using millisecond-scaled IPDs."""
         if len(self.ipds) == 0:
             print("No IPD data available for fitting.")
             return
 
-        # Scikit-learn expects 2D array input shape (n_samples, n_features)
-        ipd_data = self.ipds.reshape(-1, 1)
+        # Convert IPDs to milliseconds for proper numerical scaling
+        ipd_data_ms = (self.ipds * 1000.0).reshape(-1, 1)
 
-        # Fit Gaussian Mixture Model
-        self.gmm = GaussianMixture(n_components=n_components, random_state=42)
-        self.gmm.fit(ipd_data)
+        # Fit GMM with reduced covariance regularization floor
+        self.gmm = GaussianMixture(n_components=n_components, reg_covar=1e-12, random_state=42)
+        self.gmm.fit(ipd_data_ms)
 
-        # Calculate summary statistics
         self.stats = {
             "mean": float(np.mean(self.ipds)),
             "std_dev": float(np.std(self.ipds)),
@@ -95,24 +94,18 @@ class Calibrator:
         }
 
     def generate_artifacts(self, json_path="results/mawi_ipd/mawi_ipd_profile.json", plot_path="results/mawi_ipd/mawi_ipd_distribution.png"):
-        """Generates mawi_ipd_profile.json and mawi_ipd_distribution.png."""
+        """Generates mawi_ipd_profile.json and aligned mawi_ipd_distribution.png."""
         if self.gmm is None or len(self.ipds) == 0:
             print("Fit distribution before generating output artifacts.")
             return
 
-        # Ensure destination directory exists before writing files
-        output_dir = os.path.dirname(json_path)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
 
-        plot_dir = os.path.dirname(plot_path)
-        if plot_dir:
-            os.makedirs(plot_dir, exist_ok=True)
+        # Scale to milliseconds for plotting
+        ipds_ms = self.ipds * 1000.0
+        counts, bin_edges = np.histogram(ipds_ms, bins=50, density=True)
 
-        # Calculate empirical histogram bin edges
-        counts, bin_edges = np.histogram(self.ipds, bins=50, density=True)
-
-        # 1. Output Artifact: mawi_ipd_profile.json
         profile_data = {
             "summary_statistics": self.stats,
             "gmm_profile": {
@@ -126,31 +119,24 @@ class Calibrator:
 
         with open(json_path, "w") as f:
             json.dump(profile_data, f, indent=4)
-        print(f"Profile saved to {json_path}")
 
-        # 2. Output Artifact: mawi_ipd_distribution.png
+        # Plot empirical histogram vs fitted GMM curve in ms
         plt.figure(figsize=(10, 6))
+        plt.hist(ipds_ms, bins=50, density=True, alpha=0.6, color="skyblue", edgecolor="black", label="Empirical IPD")
 
-        # Empirical histogram
-        plt.hist(self.ipds, bins=50, density=True, alpha=0.6, color="skyblue", edgecolor="black", label="Empirical IPD")
-
-        # Fitted GMM curve grid
-        x_grid = np.linspace(min(self.ipds), max(self.ipds), 1000).reshape(-1, 1)
-        # Log probability converted to density via exp
-        log_prob = self.gmm.score_samples(x_grid)
+        x_grid_ms = np.linspace(min(ipds_ms), max(ipds_ms), 1000).reshape(-1, 1)
+        log_prob = self.gmm.score_samples(x_grid_ms)
         pdf = np.exp(log_prob)
 
-        plt.plot(x_grid, pdf, "r-", linewidth=2, label="Fitted GMM Curve")
-
+        plt.plot(x_grid_ms, pdf, "r-", linewidth=2, label="Fitted GMM Curve")
         plt.title("MAWI Inter-Packet Delay (IPD) Distribution & GMM Fit")
-        plt.xlabel("Inter-Packet Delay (seconds)")
+        plt.xlabel("Inter-Packet Delay (milliseconds)")
         plt.ylabel("Density")
         plt.grid(True, linestyle="--", alpha=0.5)
         plt.legend()
 
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         plt.close()
-        print(f"Distribution plot saved to {plot_path}")
 
 
 # --- Execution Example ---

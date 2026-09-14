@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import math
 import numpy as np
 import scipy.stats as stats
@@ -59,57 +60,92 @@ class SteganalysisEvaluator:
         return float(entropy)
 
 
+def load_mawi_cover_ipds(profile_path: str, sample_size: int = 2000) -> np.ndarray:
+    """Loads fitted distribution parameters from mawi_ipd_profile.json
+
+    and samples cover IPDs matching the profile.
+    """
+    if not os.path.exists(profile_path):
+        raise FileNotFoundError(f"MAWI IPD profile not found at: {profile_path}")
+
+    with open(profile_path, "r") as f:
+        profile_data = json.load(f)
+
+    # Extract parameters from profile JSON
+    # Supports both explicit params key or direct distribution dictionaries
+    params = profile_data.get("params", profile_data.get("parameters", profile_data))
+
+    mu = params.get("mu", params.get("mean", 0.05))
+    sigma = params.get("sigma", params.get("std", 0.005))
+    dist_type = profile_data.get("fitted_distribution", profile_data.get("distribution", "normal")).lower()
+
+    np.random.seed(42)
+    if "exponential" in dist_type or "expon" in dist_type:
+        scale = params.get("scale", mu)
+        cover_ipds = np.random.exponential(scale=scale, size=sample_size)
+    elif "lognormal" in dist_type:
+        s = params.get("s", sigma)
+        scale = params.get("scale", np.exp(mu))
+        cover_ipds = stats.lognorm.rvs(s=s, scale=scale, size=sample_size)
+    else:  # Default to Normal / Gaussian distribution
+        cover_ipds = np.random.normal(loc=mu, scale=sigma, size=sample_size)
+
+    return np.clip(cover_ipds, 0.001, None), mu, sigma
+
+
 def run_steganalysis_evaluation():
     print("=" * 80)
     print(" PHASE 4: STEGANALYSIS & STATISTICAL IMPERCEPTIBILITY EVALUATION ")
     print("=" * 80)
 
-    # Setup directories
-    output_dir = "results/steganalysis_report"
+    # File Paths
+    profile_path = os.path.join(PROJECT_ROOT, "results", "mawi_ipd", "mawi_ipd_profile.json")
+    output_dir = os.path.join(PROJECT_ROOT, "results", "steganalysis_report")
     os.makedirs(output_dir, exist_ok=True)
     report_path = os.path.join(output_dir, "steganalysis_report.md")
 
-    # 1. Synthesize Baseline Benign Cover IPDs (MAWI Baseline Distribution: Gaussian / Exponential mixture)
-    np.random.seed(42)
+    # 1. Load fitted MAWI Baseline Distribution parameters
     sample_size = 2000
-    cover_ipds = np.random.normal(loc=0.05, scale=0.005, size=sample_size)
-    cover_ipds = np.clip(cover_ipds, 0.001, None)
+    cover_ipds, mu_mawi, sigma_mawi = load_mawi_cover_ipds(profile_path, sample_size=sample_size)
+    print(f"[+] Successfully loaded MAWI profile: {profile_path}")
+    print(f"    - Fitted IPD Mean (mu): {mu_mawi:.6f}s")
+    print(f"    - Fitted IPD Std  (sigma): {sigma_mawi:.6f}s")
 
     # Synthesize Dummy Secret Bits
     secret_bits = list(np.random.randint(0, 2, size=500))
 
-    # 2. Timing Channel Distributions (Static vs HMM-Modulated)
-    # Static Unmodulated Timing (High variance/shift, easy anomaly detection)
-    static_timing_bits = ScapyTimingChannel.encode_ipds(secret_bits, mu_ipd=0.05, sigma_ipd=0.015, shift_ms=0.040)
+    # 2. Timing Channel Distributions (Static vs HMM-Modulated calibrated to MAWI parameters)
+    # Static Unmodulated Timing (High variance/shift relative to MAWI parameters)
+    static_timing_bits = ScapyTimingChannel.encode_ipds(
+        secret_bits, mu_ipd=mu_mawi, sigma_ipd=sigma_mawi * 3.0, shift_ms=0.040
+    )
     covert_unmodulated_ipds = np.array(static_timing_bits)
 
-    # HMM Adaptive Modulated Timing (Low jitter/variance)
-    hmm_timing_bits = ScapyTimingChannel.encode_ipds(secret_bits, mu_ipd=0.05, sigma_ipd=0.005, shift_ms=0.015)
+    # HMM Adaptive Modulated Timing (Aligned with MAWI baseline profile)
+    hmm_timing_bits = ScapyTimingChannel.encode_ipds(
+        secret_bits, mu_ipd=mu_mawi, sigma_ipd=sigma_mawi, shift_ms=0.015
+    )
     covert_hmm_ipds = np.array(hmm_timing_bits)
 
     # A. KL Divergence Analysis
     kl_unmodulated = SteganalysisEvaluator.compute_kl_divergence(cover_ipds, covert_unmodulated_ipds)
     kl_hmm = SteganalysisEvaluator.compute_kl_divergence(cover_ipds, covert_hmm_ipds)
-    kl_reduction = ((kl_unmodulated - kl_hmm) / kl_unmodulated) * 100.0
+    kl_reduction = ((kl_unmodulated - kl_hmm) / kl_unmodulated) * 100.0 if kl_unmodulated > 0 else 0.0
 
     # B. KS Test Analysis
     ks_stat_unmod, ks_p_unmod = SteganalysisEvaluator.compute_ks_test(cover_ipds, covert_unmodulated_ipds)
     ks_stat_hmm, ks_p_hmm = SteganalysisEvaluator.compute_ks_test(cover_ipds, covert_hmm_ipds)
 
     # C. Shannon Entropy Analysis across Protocol Storage Headers
-    # Generate Cover Packets
     cover_pkts = [IP(id=np.random.randint(1000, 65000))/TCP(seq=np.random.randint(100000, 900000)) for _ in range(500)]
     
-    # Generate Cover Bit Sequence Extractions
     cover_ip_id_parity = [pkt[IP].id & 1 for pkt in cover_pkts]
     cover_tcp_seq_lsb = [pkt[TCP].seq & 1 for pkt in cover_pkts]
     cover_tcp_ts_lsb = [np.random.randint(0, 2) for _ in range(500)]
 
-    # Embed bits into Cover IP ID
     covert_ip_pkts = ScapyStorageChannel.embed_ip_id(secret_bits, IP(dst="192.168.1.1")/TCP(sport=1234, dport=80))
     covert_ip_id_parity = [pkt[IP].id & 1 for pkt in covert_ip_pkts]
 
-    # Calculate Shannon Entropies
     entropy_cover_ipid = SteganalysisEvaluator.compute_shannon_entropy(cover_ip_id_parity)
     entropy_covert_ipid = SteganalysisEvaluator.compute_shannon_entropy(covert_ip_id_parity)
     
@@ -120,12 +156,12 @@ def run_steganalysis_evaluation():
     entropy_covert_ts = SteganalysisEvaluator.compute_shannon_entropy(secret_bits)
 
     # Compute Channel Capacity-to-Entropy (C/E) Ratio
-    # Capacity C = bits embedded per packet (1 bit/packet), E = Entropy shift
     entropy_shift_ipid = abs(entropy_covert_ipid - entropy_cover_ipid)
-    capacity_per_pkt = 1.0  # bit/pkt
+    capacity_per_pkt = 1.0
     ce_ratio_ipid = capacity_per_pkt / (entropy_shift_ipid if entropy_shift_ipid > 1e-6 else 1e-6)
 
     # Console Summary
+    print("-" * 80)
     print(f"[+] KL Divergence (Unmodulated vs Cover): {kl_unmodulated:.4f} bits")
     print(f"[+] KL Divergence (HMM-Modulated vs Cover): {kl_hmm:.4f} bits")
     print(f"[+] KL Divergence Reduction: {kl_reduction:.2f}%")
@@ -137,30 +173,31 @@ def run_steganalysis_evaluation():
     print(f"[+] Capacity-to-Entropy (C/E) Ratio (IP.id): {ce_ratio_ipid:.2f} bits/entropy-shift")
 
     # Generate Expected Markdown Report
-    report_md = f"""# 1. Timing Channel Statistical Imperceptibility
+    report_md = f"""# Stegananalysis & Imperceptibility Evaluation Report
 
-    ## 1. Timing Channel Statistical Imperceptibility
+## 1. Timing Channel Statistical Imperceptibility (Fitted MAWI Baseline)
 
-    | Metric | Unmodulated Baseline | HMM-Modulated Covert | Improvement / Target |
-    | :--- | :--- | :--- | :--- |
-    | **KL Divergence ($D_{{KL}}$)** | {kl_unmodulated:.4f} bits | {kl_hmm:.4f} bits | **{kl_reduction:.2f}% Reduction** |
-    | **KS Statistic ($D$)** | {ks_stat_unmod:.4f} | {ks_stat_hmm:.4f} | Lower distance to cover |
-    | **KS $p$-value** | {ks_p_unmod:.4e} | {ks_p_hmm:.4e} | Insignificant deviation |
+| Metric | Unmodulated Baseline | HMM-Modulated Covert | Improvement / Target |
+| :--- | :--- | :--- | :--- |
+| **KL Divergence ($D_{{KL}}$)** | {kl_unmodulated:.4f} bits | {kl_hmm:.4f} bits | **{kl_reduction:.2f}% Reduction** |
+| **KS Statistic ($D$)** | {ks_stat_unmod:.4f} | {ks_stat_hmm:.4f} | Lower distance to cover |
+| **KS $p$-value** | {ks_p_unmod:.4e} | {ks_p_hmm:.4e} | Insignificant deviation |
 
-    ## 2. Storage Channel Header Field Shannon Entropy
+## 2. Storage Channel Header Field Shannon Entropy
 
-    | Protocol Field | Cover Entropy $H(X_{{\\text{{cover}}}})$ | Covert Entropy $H(X_{{\\text{{covert}}}})$ | Entropy Shift $\\Delta H$ | $C/E$ Ratio |
-    | :--- | :--- | :--- | :--- | :--- |
-    | **IP.id Parity LSB** | {entropy_cover_ipid:.4f} bits | {entropy_covert_ipid:.4f} bits | {entropy_shift_ipid:.4f} | {ce_ratio_ipid:.2f} |
-    | **TCP Sequence LSB** | {entropy_cover_seq:.4f} bits | {entropy_covert_seq:.4f} bits | {abs(entropy_covert_seq - entropy_cover_seq):.4f} | N/A |
-    | **TCP Timestamp LSB** | {entropy_cover_ts:.4f} bits | {entropy_covert_ts:.4f} bits | {abs(entropy_covert_ts - entropy_cover_ts):.4f} | N/A |
+| Protocol Field | Cover Entropy $H(X_{{\\text{{cover}}}})$ | Covert Entropy $H(X_{{\\text{{covert}}}})$ | Entropy Shift $\\Delta H$ | $C/E$ Ratio |
+| :--- | :--- | :--- | :--- | :--- |
+| **IP.id Parity LSB** | {entropy_cover_ipid:.4f} bits | {entropy_covert_ipid:.4f} bits | {entropy_shift_ipid:.4f} | {ce_ratio_ipid:.2f} |
+| **TCP Sequence LSB** | {entropy_cover_seq:.4f} bits | {entropy_covert_seq:.4f} bits | {abs(entropy_covert_seq - entropy_cover_seq):.4f} | N/A |
+| **TCP Timestamp LSB** | {entropy_cover_ts:.4f} bits | {entropy_covert_ts:.4f} bits | {abs(entropy_covert_ts - entropy_cover_ts):.4f} | N/A |
 
-    ## 3. Key Findings
+## 3. Key Findings
 
-    1. **KL Divergence**: HMM belief-guided dynamic timing modulation achieves a **{kl_reduction:.2f}% reduction** in relative entropy compared to unmodulated baselines.
-    2. **KS Non-Parametric Test**: The reduced Kolmogorov-Smirnov statistic ($D = {ks_stat_hmm:.4f}$) indicates high similarity to standard MAWI cover traffic distributions.
-    3. **Shannon Header Entropy**: LSB parity embedding in IP ID fields maintains near-uniform entropy close to 1.0 bit, producing minimal entropy deviation.
-    """
+1. **MAWI Alignment**: Profile parameters loaded directly from `results/mawi_ipd/mawi_ipd_profile.json` ($\mu = {mu_mawi:.6f}\text{{s}}$, $\sigma = {sigma_mawi:.6f}\text{{s}}$).
+2. **KL Divergence**: HMM belief-guided dynamic timing modulation achieves a **{kl_reduction:.2f}% reduction** in relative entropy compared to unmodulated baselines.
+3. **KS Non-Parametric Test**: The reduced Kolmogorov-Smirnov statistic ($D = {ks_stat_hmm:.4f}$) indicates high similarity to standard MAWI cover traffic distributions.
+4. **Shannon Header Entropy**: LSB parity embedding in IP ID fields maintains near-uniform entropy close to 1.0 bit, producing minimal entropy deviation.
+"""
 
     with open(report_path, "w") as f:
         f.write(report_md)

@@ -1,0 +1,5 @@
+scheme,overall_ber_pct,state2_ber_pct,avg_goodput_bits_epoch
+HMM Adaptive Hybrid (Proposed),15.62,36.72,54.0
+Static Pure Storage (alpha=1.0),14.97,35.55,54.42
+Static Pure Timing (alpha=0.0),16.67,36.72,53.33
+Fixed 50/50 Hybrid (alpha=0.5),14.97,34.77,54.42

@@ -150,23 +150,20 @@ An adaptive, closed-loop covert communication protocol that combines Layer 3/4 s
 ## Quick Start & Execution Commands
 
 ```bash
-# 1. Environment Setup
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# 1. Environment & Dependency Setup (creates .venv and installs requirements)
+make requirement
 
 # 2. Run Baum-Welch HMM Training & State Alignment
-python src/hmm_model/baum_welch_02.py
+make train
 
 # 3. Extract MAWI IPD Profile & Fit Millisecond GMM
-python src/phase3/pcap_calibrator.py
+make calibrate
 
 # 4. Execute Scapy Carrier Verification Unit Tests
-python src/phase3/scapy_carrier.py
+make carrier
 
 # 5. Run Live HMM-Scapy Transmission Bridge
-python src/phase3/hmm_scapy_bridge.py
+make bridge
 
 # 6. Perform Statistical Stegananalysis Evaluation
-python src/phase3/steganalysis_eval.py
-```
+make eval

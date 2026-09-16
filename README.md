@@ -14,27 +14,54 @@ An adaptive, closed-loop covert communication protocol that combines Layer 3/4 s
 
 ```text
 .
-├── src/
-│   ├── hmm_model/
-│   │   ├── hmm_engine.py          # Online Bayesian forward filtering controller
-│   │   ├── splitter.py            # Adaptive binary payload partitioner
-│   │   ├── channels.py            # Basic storage and timing channel abstractions
-│   │   ├── simulator.py           # Active warden threat simulator (S0, S1, S2)
-│   │   ├── sweep_exp.py           # 3 x 3 x 3 factorial sweep harness (135 runs)
-│   │   ├── baum_welch.py          # Unsupervised Expectation-Maximization trainer
-│   │   └── baum_welch_02.py       # Aligned Baum-Welch trainer and evaluation pipeline
-│   └── phase3/
-│       ├── pcap_calibrator.py     # MAWI PCAP timestamp extraction & ms-GMM fitting
-│       ├── scapy_carrier.py       # Multi-channel Scapy packet crafter & extractor
-│       ├── hmm_scapy_bridge.py    # Closed-loop live Scapy packet transmission engine
-│       └── steganalysis_eval.py   # KL divergence, KS test, and Shannon entropy evaluator
-├── dataset/
-│   ├── mawi/                      # Streamed MAWI backbone PCAP traces
-│   └── wireshark/                 # Local Wireshark sample PCAP templates
-├── results/                       # Generated benchmark logs, profiles, and plots
-├── context.md                     # System formalization and research context
-├── README.md                      # Project documentation
-└── requirements.txt               # Python dependencies
+├── context.md
+├── docs
+│   └── dataset.md
+├── experiments
+│   ├── aligned_baum_welch.py
+│   ├── baum_welch.py
+│   └── sweep_exp.py
+├── Makefile
+├── publication_figure.py
+├── README.md
+├── requirements.txt
+├── results
+│   ├── aligned_hmm_output
+│   │   ├── learned_hmm_metrics.csv
+│   │   └── learned_hmm_model.json
+│   ├── hmm_scapy_bridge
+│   │   └── scapy_hmm_results.csv
+│   ├── learned_hmm_output
+│   │   ├── learned_hmm_metrics.csv
+│   │   └── learned_hmm_model.json
+│   ├── mawi_ipd
+│   │   ├── mawi_ipd_distribution.png
+│   │   └── mawi_ipd_profile.json
+│   ├── mininet
+│   │   ├── baseline_comparison_summary.csv
+│   │   ├── pure_alpha.csv
+│   │   ├── pure_beta.csv
+│   │   ├── scapy_hmm_results.csv
+│   │   ├── split_alpha_beta.csv
+│   │   └── steganalysis_report.md
+│   ├── plots
+│   │   ├── ber_goodput_comparison.png
+│   │   └── epoch_adaptation_trace.png
+│   ├── steganalysis_report
+│   │   └── steganalysis_report.md
+│   └── sweep_output
+│       └── sweep_results.csv
+└── src
+    ├── hmm_model
+    │   ├── channels.py
+    │   ├── hmm_engine.py
+    │   ├── simulator.py
+    │   └── splitter.py
+    └── phase3
+        ├── hmm_scapy_bridge.py
+        ├── pcap_calibrator.py
+        ├── scapy_carrier.py
+        └── steganalysis_eval.py
 ```
 
 ---

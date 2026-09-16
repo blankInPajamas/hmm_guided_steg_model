@@ -103,16 +103,47 @@ An adaptive, closed-loop covert communication protocol that combines Layer 3/4 s
 
 ---
 
-## Future Work & Next Steps
+## Recent Work
 
-1. **Live Socket & Virtual Network Deployment (`veth` / `Mininet`)**:
-   * Replace in-memory simulated interfaces with raw Linux virtual Ethernet (`veth`) socket pairs or a multi-hop `Mininet` topology.
-   * Deploy an active Linux gateway node enforcing real-time IP ID field scrubbing and network jitter to evaluate live feedback latency.
-2. **Modern Encrypted & High-Speed Datasets (UNSW-MG24 & CAIDA)**:
-   * Process modern 5G/IoT multi-protocol traffic (`UNSW-MG24`) and high-speed commercial backbone traces (`CAIDA 2018/2019`).
-   * Benchmark HMM timing channel imperceptibility over encrypted UDP/QUIC and TLS 1.3 streams where deep packet inspection (DPI) cannot inspect payloads.
-3. **Academic Manuscript Preparation**:
-   * Finalize paper structure, integrating Baum-Welch EM formalisms, Scapy carrier schematics, MAWI GMM distribution plots (`mawi_ipd_distribution.png`), and empirical steganalysis tables for journal submission.
+### 1. Live Mininet Testbed Implementation & Socket Streaming
+- **Topology & Active Warden Setup**: Deployed a 3-node routed virtual network topology (`mininet_topo.py`) with host `h1` (Sender), middlebox router `h2` (Active Warden), and host `h3` (Receiver). Simulated realistic network impairment on `h2` using Linux Traffic Control (`tc qdisc netem delay 10ms 5ms distribution normal`) alongside an inline packet-scrubbing middlebox (`live_warden.py`).
+- **Closed-Loop Socket Bridge**: Extended `src/phase3/scapy_hmm_bridge.py` for live socket transmission over virtual Ethernet interfaces (`h1-eth0` to `h3` at `10.0.2.2`). Embedded secret payload bits dynamically into `IP.id` parity fields (storage channel) and inter-packet delays (timing channel).
+
+### 2. Statistical Imperceptibility Evaluation
+- **MAWI Backbone Profiling**: Calibrated timing channel modulators against fitted backbone traffic profiles from the MAWI dataset ($\mu = 0.050\text{s}$, $\sigma = 0.005\text{s}$).
+- **Relative Entropy & Distribution Metrics**: Achieved a **5.60% reduction in relative entropy** ($D_{KL} = 13.0822\text{ bits}$) and lower non-parametric distance ($D = 0.4145$ on Kolmogorov-Smirnov test) compared to unmodulated timing baselines.
+- **Header Entropy Integrity**: LSB embedding maintained near-uniform Shannon header entropy ($H \approx 0.9996\text{ bits}$, $\Delta H \le 0.0004$), producing a high Capacity-to-Entropy ratio ($C/E = 2406.53$).
+
+### 3. Baseline Comparison & Visualization
+- **Comparative Benchmark Runs**: Executed 12-epoch dynamic transmission tests across four distinct schemes:
+  1. Proposed HMM Adaptive Hybrid Controller
+  2. Static Pure Storage Channel ($\alpha = 1.0$)
+  3. Static Pure Timing Channel ($\alpha = 0.0$)
+  4. Fixed 50/50 Hybrid Channel ($\alpha = 0.5$)
+- **Generated Publication Figures**:
+  - **`results/plots/epoch_adaptation_trace.png`**: Illustrates closed-loop warden threat state inference ($\hat{S}_t$ vs. $S_t$) and dynamic payload allocation adaptation ($\alpha_t$ vs. $\beta_t$) across all 12 transmission epochs.
+  - **`results/plots/ber_goodput_comparison.png`**: Compares the Overall Schedule Bit Error Rate (BER) and Active Scrubbing Phase BER (State 2) across all four evaluation schemes.
+
+![Epoch Adaptation Trace](results/plots/epoch_adaptation_trace.png)
+*Figure 1: HMM closed-loop threat state inference and dynamic payload allocation ratio adaptation across epochs.*
+
+![BER & Goodput Comparison](results/plots/ber_goodput_comparison.png)
+*Figure 2: Overall schedule and active scrubbing phase Bit Error Rate (BER) comparison across transmission schemes.*
+
+---
+
+## Future Work
+
+1. **Fast-Path Anomaly Trigger & HMM Hysteresis Reduction**:
+   - Implement an explicit fast-path belief update inside `HMMEngineBridge.update_belief()` when active middlebox scrubbing ($v_t = 2$) is detected. This eliminates the 1–2 epoch transition lag observed during sudden threat escalations (e.g., Epoch 11).
+
+2. **Extended Multi-Phase Evaluation (50–100 Epochs)**:
+   - Scale the live Mininet socket evaluation schedule from 12 epochs to **50–100 epochs** across a 6-phase threat profile (Extended Clean, Inspection Escalation, Prolonged Scrubbing, Subsidence, Recovery, and Bursty Intermittent Attack).
+   - Evaluate long-term steady-state Bit Error Rate (BER) and Goodput (kbps) to establish tight statistical confidence intervals for journal publication.
+
+3. **Multi-Environment Cross-Domain Profiling**:
+   - Process benign PCAP traces from **UNSW-MG24** (5G/Cellular) and **CIC-IoT-2023** (Smart Home/IoT) via `pcap_calibrator.py`.
+   - Construct a **3-Tier Cross-Domain Imperceptibility Matrix** comparing $D_{KL}$, KS statistics, and throughput across Backbone, 5G, and IoT cover environments.
 
 ---
 

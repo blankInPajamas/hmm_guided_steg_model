@@ -210,7 +210,18 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
         rx_storage_payload = rx_storage[SYNC_LEN:SYNC_LEN + len(storage_bits)]
         rx_timing_payload  = rx_timing[SYNC_LEN:SYNC_LEN + len(timing_bits)]
 
-        
+        # Print sync bits for the first 3 epochs only
+        if epoch <= 3:
+            print(f"\n[DEBUG epoch {epoch}] true_state={true_state}")
+            print(f"  sync storage TX: {sync_storage_tx}")
+            print(f"  sync storage RX: {sync_storage_rx}")
+            print(f"  sync timing  TX: {sync_timing_tx}")
+            print(f"  sync timing  RX: {sync_timing_rx}")
+            print(f"  rx_storage[:20]: {rx_storage[:20]}")
+            print(f"  rx_timing[:20]:  {rx_timing[:20]}")
+            print(f"  len(rx_storage)={len(rx_storage)}  len(rx_timing)={len(rx_timing)}")
+            print(f"  len(tx_storage)={len(tx_storage)}  len(tx_timing)={len(tx_timing)}")
+            print()
 
         # --- 8. Observation for HMM (receiver-visible only) -----------
         obs, obs_detail = measure_observation(

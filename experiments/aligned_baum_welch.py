@@ -1,32 +1,83 @@
 """
-Baum-Welch learned HMM experiment with state re-alignment.
+aligned_baum_welch.py — Baum-Welch EM with state re-alignment.
 
-Expected files in the same directory:
-    splitter.py
-    channels.py
+Trains an HMM on observations produced by the fixed simulator pipeline
+(`src/hmm_model/simulator.py`), whose observation signal is derived ONLY
+from receiver-measurable sync-bit error statistics. Ground truth
+(warden.true_state) never leaks into the observation.
+
+Outputs (overwrites):
+    results/aligned_hmm_output/learned_hmm_model.json
+    results/aligned_hmm_output/learned_hmm_metrics.csv
 
 Run:
-    python baum_welch_experiment_aligned.py
+    make train
+    # or
+    python experiments/aligned_baum_welch.py
 """
 
+import os
+import sys
 import csv
 import json
 import random
-from pathlib import Path
-from typing import Sequence
+from collections import Counter
 
 import numpy as np
 
-from channels import StorageChannel, TimingChannel
-from splitter import PayloadSplitter
+# ---------------------------------------------------------------------------
+# Path bootstrap — MUST come before any `from src...` import
+# ---------------------------------------------------------------------------
+_HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-N_STATES = 3
-N_OBSERVATIONS = 3
-EPSILON = 1e-4
+if not os.path.isdir(os.path.join(PROJECT_ROOT, "src")):
+    raise RuntimeError(
+        f"src/ not found under PROJECT_ROOT={PROJECT_ROOT!r}. "
+        f"Run this script from the project root.")
+
+# ---------------------------------------------------------------------------
+# Project imports (now safe)
+# ---------------------------------------------------------------------------
+from src.hmm_model import simulator as sim
+from src.hmm_model.channels import StorageChannel, TimingChannel
+
+# ---------------------------------------------------------------------------
+# Bind simulator exports
+# ---------------------------------------------------------------------------
+print(f"[IMPORT] simulator loaded from: {sim.__file__}")
+for _name in ("SYNC_PATTERN", "SYNC_LEN", "SimulatedWarden",
+              "StorageChannel", "TimingChannel", "measure_observation"):
+    if not hasattr(sim, _name):
+        raise ImportError(
+            f"simulator module at {sim.__file__!r} lacks attribute "
+            f"{_name!r}.")
+
+SYNC_PATTERN        = sim.SYNC_PATTERN
+SYNC_LEN            = sim.SYNC_LEN
+SimulatedWarden     = sim.SimulatedWarden
+measure_observation = sim.measure_observation
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+N_STATES           = 3
+N_OBSERVATIONS     = 3
+EPSILON            = 1e-4
 DEFAULT_CHUNK_SIZE = 64
-DEFAULT_SEED = 42
+DEFAULT_SEED       = 42
 
+OUTPUT_DIR   = os.path.join(PROJECT_ROOT, "results", "aligned_hmm_output")
+MODEL_PATH   = os.path.join(OUTPUT_DIR, "learned_hmm_model.json")
+METRICS_PATH = os.path.join(OUTPUT_DIR, "learned_hmm_metrics.csv")
+
+
+# ---------------------------------------------------------------------------
+# Baum-Welch EM (scaled forward/backward)
+# ---------------------------------------------------------------------------
 
 class BaumWelchHMM:
     def __init__(self, n_states=N_STATES, n_observations=N_OBSERVATIONS,
@@ -35,30 +86,16 @@ class BaumWelchHMM:
         self.n_observations = n_observations
         self.epsilon = epsilon
         self.rng = np.random.default_rng(seed)
-        self.A, self.B, self.pi = self._random_model()
-        self.last_log_likelihood = None
-        self.training_history = []
 
-    def _normalize_vector(self, vector):
-        vector = np.maximum(np.asarray(vector, dtype=float), self.epsilon)
-        return vector / vector.sum()
-
-    def _normalize_rows(self, matrix):
-        matrix = np.maximum(np.asarray(matrix, dtype=float), self.epsilon)
-        return matrix / matrix.sum(axis=1, keepdims=True)
-
-    def _random_model(self):
-        A = self.rng.uniform(0.95, 1.05, (self.n_states, self.n_states))
-        B = self.rng.uniform(0.95, 1.05, (self.n_states, self.n_observations))
-        pi = self.rng.uniform(0.95, 1.05, self.n_states)
-        return self._normalize_rows(A), self._normalize_rows(B), self._normalize_vector(pi)
+        self.A  = self.rng.dirichlet([2] * n_states, size=n_states)
+        self.B  = self.rng.dirichlet([2] * n_observations, size=n_states)
+        self.pi = self.rng.dirichlet([2] * n_states)
 
     def _validate_observations(self, observations):
         values = np.asarray(list(observations), dtype=int)
-        if values.ndim != 1 or len(values) == 0:
-            raise ValueError("Observations must be a non-empty one-dimensional sequence")
         if np.any(values < 0) or np.any(values >= self.n_observations):
-            raise ValueError("Each observation must be 0, 1, or 2")
+            raise ValueError(
+                f"Each observation must be in [0, {self.n_observations})")
         return values
 
     def scaled_forward(self, observations):
@@ -68,15 +105,22 @@ class BaumWelchHMM:
         scales = np.zeros(T)
 
         alpha[0] = self.pi * self.B[:, observations[0]]
-        scales[0] = max(alpha[0].sum(), self.epsilon)
-        alpha[0] /= scales[0]
+        c = alpha[0].sum()
+        if c <= 0:
+            raise RuntimeError("Forward pass: zero normalization at t=0")
+        alpha[0] /= c
+        scales[0] = c
 
         for t in range(1, T):
             alpha[t] = (alpha[t - 1] @ self.A) * self.B[:, observations[t]]
-            scales[t] = max(alpha[t].sum(), self.epsilon)
-            alpha[t] /= scales[t]
+            c = alpha[t].sum()
+            if c <= 0:
+                raise RuntimeError(f"Forward pass: zero normalization at t={t}")
+            alpha[t] /= c
+            scales[t] = c
 
-        return alpha, scales, float(np.sum(np.log(scales)))
+        log_likelihood = float(np.sum(np.log(scales)))
+        return alpha, scales, log_likelihood
 
     def scaled_backward(self, observations, scales):
         observations = self._validate_observations(observations)
@@ -85,8 +129,9 @@ class BaumWelchHMM:
         beta[-1] = 1.0
 
         for t in range(T - 2, -1, -1):
-            beta[t] = self.A @ (self.B[:, observations[t + 1]] * beta[t + 1])
-            beta[t] /= max(scales[t + 1], self.epsilon)
+            beta[t] = (self.A @ (self.B[:, observations[t + 1]] * beta[t + 1]))
+            beta[t] /= scales[t + 1]
+
         return beta
 
     def expectation_step(self, observations):
@@ -96,275 +141,203 @@ class BaumWelchHMM:
         T = len(observations)
 
         gamma = alpha * beta
-        gamma /= np.maximum(gamma.sum(axis=1, keepdims=True), self.epsilon)
+        row_sums = gamma.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        gamma = gamma / row_sums
 
-        xi = np.zeros((max(T - 1, 0), self.n_states, self.n_states))
+        xi = np.zeros((T - 1, self.n_states, self.n_states))
         for t in range(T - 1):
-            xi_t = (
-                alpha[t, :, None]
-                * self.A
-                * self.B[None, :, observations[t + 1]]
-                * beta[t + 1, None, :]
-            )
-            xi[t] = xi_t / max(xi_t.sum(), self.epsilon)
+            num = (alpha[t][:, None]
+                   * self.A
+                   * (self.B[:, observations[t + 1]] * beta[t + 1])[None, :])
+            denom = num.sum()
+            if denom > 0:
+                xi[t] = num / denom
 
         return gamma, xi, log_likelihood
 
     def maximization_step(self, observations, gamma, xi):
         observations = self._validate_observations(observations)
-        T = len(observations)
-        self.pi = self._normalize_vector(gamma[0])
 
-        if T > 1:
-            denominator = np.maximum(gamma[:-1].sum(axis=0), self.epsilon)
-            self.A = self._normalize_rows(xi.sum(axis=0) / denominator[:, None])
+        self.pi = gamma[0] / max(gamma[0].sum(), self.epsilon)
+
+        A_new = xi.sum(axis=0) + self.epsilon
+        A_new /= A_new.sum(axis=1, keepdims=True)
+        self.A = A_new
 
         B_new = np.zeros((self.n_states, self.n_observations))
         for state in range(self.n_states):
-            denominator = max(gamma[:, state].sum(), self.epsilon)
             for observation in range(self.n_observations):
-                B_new[state, observation] = gamma[observations == observation, state].sum()
-            B_new[state] /= denominator
-        self.B = self._normalize_rows(B_new)
+                mask = (observations == observation)
+                B_new[state, observation] = gamma[mask, state].sum()
+        B_new += self.epsilon
+        B_new /= B_new.sum(axis=1, keepdims=True)
+        self.B = B_new
 
     def fit(self, observations, max_iter=100, tolerance=1e-5, verbose=True):
         observations = self._validate_observations(observations)
-        self.training_history = []
-        previous = None
+        history = []
+        prev_ll = -np.inf
 
-        for iteration in range(1, max_iter + 1):
+        for it in range(1, max_iter + 1):
             gamma, xi, log_likelihood = self.expectation_step(observations)
             self.maximization_step(observations, gamma, xi)
-            self.training_history.append({
-                "iteration": iteration,
-                "log_likelihood": log_likelihood,
-            })
+            history.append({"iteration": it,
+                            "log_likelihood": float(log_likelihood)})
 
-            if verbose and (iteration == 1 or iteration % 10 == 0):
-                print(f"[TRAIN] iteration={iteration:03d}, log_likelihood={log_likelihood:.6f}")
+            if verbose and (it <= 10 or it % 10 == 0 or it == max_iter):
+                print(f"[TRAIN] iteration={it:03d}, "
+                      f"log_likelihood={log_likelihood:.6f}")
 
-            if previous is not None and abs(log_likelihood - previous) < tolerance:
+            if abs(log_likelihood - prev_ll) < tolerance:
+                if verbose:
+                    print(f"[TRAIN] converged at iteration {it}")
                 break
-            previous = log_likelihood
+            prev_ll = log_likelihood
 
-        self.last_log_likelihood = self.training_history[-1]["log_likelihood"]
-        return self
-
-    def filter_observation(self, observation, belief=None):
-        if observation < 0 or observation >= self.n_observations:
-            raise ValueError("Observation must be 0, 1, or 2")
-        if belief is None:
-            belief = self.pi.copy()
-        prior = np.asarray(belief) @ self.A
-        return self._normalize_vector(prior * self.B[:, observation])
-
-    def continuous_ratio(self, belief=None):
-        if belief is None:
-            belief = self.pi
-        belief = self._normalize_vector(belief)
-        alpha = float(np.dot(belief, np.array([0.90, 0.50, 0.10])))
-        alpha = min(max(alpha, 0.0), 1.0)
-        return alpha, 1.0 - alpha
+        return history
 
 
-class SimulatedWarden:
-    def __init__(self, true_state):
-        self.true_state = true_state
+# ---------------------------------------------------------------------------
+# Observation generation — HONEST version
+# ---------------------------------------------------------------------------
 
-    def process_traffic(self, storage_packets, timing_delays):
-        received_packets = []
-        received_delays = []
-        scrubbed_count = 0
+def generate_observation_sequence(schedule, seed=DEFAULT_SEED):
+    """
+    Produce a sequence of observations v_t using the fixed simulator.
+    The observation is derived ONLY from sync-bit BER at the receiver.
+    """
+    rng = random.Random(seed)
+    storage_ch = StorageChannel()
+    timing_ch = TimingChannel()
+    dummy_payload = "0" * DEFAULT_CHUNK_SIZE
 
-        for packet in storage_packets:
-            packet_copy = packet.copy()
-            if self.true_state == 2 and random.random() < 0.70:
-                packet_copy["ip_id"] = random.randint(1000, 65000)
-                scrubbed_count += 1
-            elif self.true_state == 1 and random.random() < 0.20:
-                packet_copy["ip_id"] = random.randint(1000, 65000)
-                scrubbed_count += 1
-            received_packets.append(packet_copy)
-
-        noise_scale = {0: 0.002, 1: 0.015, 2: 0.040}[self.true_state]
-        for delay in timing_delays:
-            received_delays.append(max(0.01, delay + random.normalvariate(0.0, noise_scale)))
-
-        storage_count = len(storage_packets)
-        scrub_ratio = scrubbed_count / storage_count if storage_count else 0.0
-        if scrub_ratio > 0.40 or self.true_state == 2:
-            observation = 2
-        elif scrub_ratio > 0.10 or self.true_state == 1:
-            observation = 1
-        else:
-            observation = 0
-        return received_packets, received_delays, observation
-
-
-def make_standard_scenarios():
-    return {
-        "baseline_multistage": [0] * 10 + [2] * 10 + [1] * 10,
-        "sudden_attack": [0] * 15 + [2] * 15,
-        "bursty_attack": [state for _ in range(5) for state in ([0] * 3 + [2] * 3)],
-        "prolonged_high_recovery": [2] * 20 + [0] * 10,
-        "medium_dominated": [1] * 5 + [0] * 3 + [1] * 5 + [2] * 3 + [1] * 5,
-    }
-
-
-def make_training_sequences(scenarios, repeats=20):
-    sequences = []
-    for schedule in scenarios.values():
-        for _ in range(repeats):
-            observations = []
-            for state in schedule:
-                _, _, observation = SimulatedWarden(state).process_traffic([], [])
-                observations.append(observation)
-            sequences.append(observations)
-    return sequences
-
-
-def train_from_sequences(sequences, seed=DEFAULT_SEED):
-    """Train on concatenated observation sequences and align states."""
-    flattened = [observation for sequence in sequences for observation in sequence]
-    model = BaumWelchHMM(seed=seed)
-    model.fit(flattened, max_iter=100, tolerance=1e-5, verbose=True)
-
-    # State alignment: 0 = Clean, 1 = Degraded, 2 = Scrubbing.
-    order = np.argsort([np.argmax(model.B[i]) for i in range(model.n_states)])
-    model.A = model.A[order][:, order]
-    model.B = model.B[order]
-    model.pi = model.pi[order]
-
-    return model
-
-
-def make_secret_message():
-    return (
-        "CONFIDENTIAL_PAYLOAD_HMM_GUIDED_HYBRID_STEGANOGRAPHY_PROTOCOL_TEST_DATA_"
-        "EVADING_SOTA_ACTIVE_WARDEN_VIA_DYNAMIC_STORAGE_TIMING_RATIO_ALLOCATION"
-    )
-
-
-def run_scenario(model, schedule, secret_message, chunk_size=DEFAULT_CHUNK_SIZE):
-    splitter = PayloadSplitter(secret_message)
-    storage_channel = StorageChannel()
-    timing_channel = TimingChannel()
-    belief = model.pi.copy()
-
-    total_bits = total_errors = 0
-    storage_errors = timing_errors = 0
-    storage_bits = timing_bits = 0
-    inferred_states = []
-    true_states = []
-    ratios = []
-
+    observations = []
     for true_state in schedule:
-        if splitter.is_complete():
-            break
+        tx_storage = SYNC_PATTERN + dummy_payload
+        tx_timing  = SYNC_PATTERN + dummy_payload
 
-        alpha, beta = model.continuous_ratio(belief)
-        inferred_state = int(np.argmax(belief))
-        storage_chunk, timing_chunk = splitter.fetch_next_chunk(chunk_size, alpha, beta)
-        storage_bits += len(storage_chunk)
-        timing_bits += len(timing_chunk)
-        total_bits += len(storage_chunk) + len(timing_chunk)
+        storage_pkts  = storage_ch.embed_in_ip_id(tx_storage)
+        timing_delays = timing_ch.encode_ipds(tx_timing)
 
-        packets = storage_channel.embed_in_ip_id(storage_chunk)
-        delays = timing_channel.encode_ipds(timing_chunk)
-        received_packets, received_delays, observation = SimulatedWarden(true_state).process_traffic(
-            packets, delays
-        )
+        warden = SimulatedWarden(true_state=true_state)
+        rx_pkts, rx_delays = warden.process_traffic(
+            storage_pkts, timing_delays, rng=rng)
 
-        received_storage = storage_channel.extract_from_ip_id(received_packets)
-        received_timing = timing_channel.decode_ipds(received_delays)
-        storage_epoch_errors = sum(a != b for a, b in zip(storage_chunk, received_storage))
-        timing_epoch_errors = sum(a != b for a, b in zip(timing_chunk, received_timing))
-        storage_errors += storage_epoch_errors
-        timing_errors += timing_epoch_errors
-        total_errors += storage_epoch_errors + timing_epoch_errors
+        rx_storage = storage_ch.extract_from_ip_id(rx_pkts)
+        rx_timing  = timing_ch.decode_ipds(rx_delays)
 
-        true_states.append(true_state)
-        inferred_states.append(inferred_state)
-        ratios.append((alpha, beta))
-        belief = model.filter_observation(observation, belief)
+        obs, _ = measure_observation(
+            tx_storage[:SYNC_LEN], rx_storage[:SYNC_LEN],
+            tx_timing[:SYNC_LEN],  rx_timing[:SYNC_LEN])
+        observations.append(int(obs))
 
-    epochs = len(true_states)
-    return {
-        "epochs_run": epochs,
-        "total_bits": total_bits,
-        "storage_bits": storage_bits,
-        "timing_bits": timing_bits,
-        "total_errors": total_errors,
-        "storage_errors": storage_errors,
-        "timing_errors": timing_errors,
-        "ber": total_errors / total_bits if total_bits else 0.0,
-        "goodput_bits_per_epoch": (total_bits - total_errors) / epochs if epochs else 0.0,
-        "state_accuracy": (
-            sum(a == b for a, b in zip(true_states, inferred_states)) / epochs
-            if epochs else 0.0
-        ),
-        "mean_storage_ratio": float(np.mean([x[0] for x in ratios])) if ratios else 0.0,
-        "mean_timing_ratio": float(np.mean([x[1] for x in ratios])) if ratios else 0.0,
-    }
+    return observations
 
 
-def save_metrics(metrics, path):
-    if not metrics:
-        return
-    with open(path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(metrics[0].keys()))
-        writer.writeheader()
-        writer.writerows(metrics)
+def build_training_schedule(n_epochs=2000, seed=DEFAULT_SEED):
+    """Warden schedule with realistic state persistence (70% stickiness)."""
+    rng = random.Random(seed)
+    schedule = [0]
+    for _ in range(n_epochs - 1):
+        if rng.random() < 0.70:
+            schedule.append(schedule[-1])
+        else:
+            choices = [0, 1, 2]
+            choices.remove(schedule[-1])
+            schedule.append(rng.choice(choices))
+    return schedule
 
 
-def save_model(model, path):
-    payload = {
-        "A": model.A.tolist(),
-        "B": model.B.tolist(),
-        "pi": model.pi.tolist(),
-        "last_log_likelihood": model.last_log_likelihood,
-        "training_history": model.training_history,
+# ---------------------------------------------------------------------------
+# State alignment
+# ---------------------------------------------------------------------------
+
+def align_states(model_A, model_B, model_pi):
+    """Sort states by expected observation index (0 lowest, 2 highest)."""
+    expected_v = model_B @ np.array([0, 1, 2])
+    order = np.argsort(expected_v)
+    return (model_A[np.ix_(order, order)],
+            model_B[order],
+            model_pi[order])
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    print("=" * 72)
+    print(" BAUM-WELCH TRAINING WITH HONEST OBSERVATIONS")
+    print("=" * 72)
+
+    # 1. Build a long, transition-rich warden schedule
+    schedule = build_training_schedule(n_epochs=2000, seed=DEFAULT_SEED)
+    state_counts = Counter(schedule)
+    print(f"[DATA] schedule length = {len(schedule)}")
+    print(f"[DATA] state distribution = {dict(state_counts)}")
+
+    # 2. Generate honest observations using the fixed simulator
+    observations = generate_observation_sequence(schedule, seed=DEFAULT_SEED)
+    obs_counts = Counter(observations)
+    print(f"[DATA] observation distribution = {dict(obs_counts)}")
+
+    # 3. Report empirical emission matrix B_hat
+    emp_B = np.zeros((N_STATES, N_OBSERVATIONS))
+    for s, v in zip(schedule, observations):
+        emp_B[s, v] += 1
+    emp_B /= emp_B.sum(axis=1, keepdims=True)
+    print("[DATA] empirical emission B_hat (rows = true state):")
+    for s in range(N_STATES):
+        print(f"       S{s}: " + "  ".join(f"{x:.3f}" for x in emp_B[s]))
+
+    # 4. Train Baum-Welch
+    print("\n[TRAIN] starting Baum-Welch EM ...")
+    hmm = BaumWelchHMM(seed=DEFAULT_SEED)
+    history = hmm.fit(observations, max_iter=200, tolerance=1e-6)
+
+    # 5. Align states
+    A_aligned, B_aligned, pi_aligned = align_states(hmm.A, hmm.B, hmm.pi)
+
+    print("\n=== ALIGNED LEARNED MODEL ===")
+    print("A =")
+    print(np.round(A_aligned, 6))
+    print("B =")
+    print(np.round(B_aligned, 6))
+    print("pi =", np.round(pi_aligned, 6))
+
+    # 6. Persist artifacts
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    model = {
+        "A": A_aligned.tolist(),
+        "B": B_aligned.tolist(),
+        "pi": pi_aligned.tolist(),
+        "last_log_likelihood": history[-1]["log_likelihood"],
+        "training_history": history,
+        "training_data_summary": {
+            "schedule_length": len(schedule),
+            "state_distribution": dict(state_counts),
+            "observation_distribution": dict(obs_counts),
+            "empirical_B": emp_B.tolist(),
+        },
         "state_alignment": {
             "state_0": "clean / observation 0",
             "state_1": "degraded / observation 1",
             "state_2": "scrubbing / observation 2",
         },
     }
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2)
 
+    with open(MODEL_PATH, "w") as f:
+        json.dump(model, f, indent=2)
+    print(f"\n[SAVE] wrote model to {MODEL_PATH}")
 
-def main():
-    random.seed(DEFAULT_SEED)
-    np.random.seed(DEFAULT_SEED)
-
-    output_dir = Path("learned_hmm_output_02")
-    output_dir.mkdir(exist_ok=True)
-
-    scenarios = make_standard_scenarios()
-    training_sequences = make_training_sequences(scenarios, repeats=20)
-    model = train_from_sequences(training_sequences, seed=DEFAULT_SEED)
-
-    print("\n=== ALIGNED LEARNED MODEL ===")
-    print("A =\n", np.array2string(model.A, precision=6))
-    print("B =\n", np.array2string(model.B, precision=6))
-    print("pi =", np.array2string(model.pi, precision=6))
-
-    results = []
-    for scenario_name, schedule in scenarios.items():
-        metrics = run_scenario(model, schedule, make_secret_message())
-        results.append({"scenario": scenario_name, **metrics})
-        print(
-            f"[EVAL] {scenario_name} | BER={metrics['ber']:.4f} | "
-            f"goodput={metrics['goodput_bits_per_epoch']:.2f} | "
-            f"accuracy={metrics['state_accuracy']:.2%} | "
-            f"storage_errors={metrics['storage_errors']} | "
-            f"timing_errors={metrics['timing_errors']}"
-        )
-
-    save_metrics(results, output_dir / "learned_hmm_metrics.csv")
-    save_model(model, output_dir / "learned_hmm_model.json")
-    print(f"\nSaved results to {output_dir}")
+    with open(METRICS_PATH, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["iteration", "log_likelihood"])
+        for row in history:
+            writer.writerow([row["iteration"], row["log_likelihood"]])
+    print(f"[SAVE] wrote training history to {METRICS_PATH}")
 
 
 if __name__ == "__main__":

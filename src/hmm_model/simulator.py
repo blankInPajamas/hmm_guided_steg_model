@@ -14,8 +14,14 @@ Two invariants this file must uphold:
       not operating in the coin-flip regime. See TimingChannel docs.
 """
 
+import os
+import sys
 import random
 import numpy as np
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 from hmm_engine import HMMEngine
 from splitter import PayloadSplitter
@@ -35,7 +41,7 @@ WARDEN_JITTER_STD = {0: 0.002, 1: 0.015, 2: 0.040}
 # Sync-pattern length per channel per epoch (bits).
 # 64 gives us a reliable sync-BER estimate even at 20% scrub rates:
 #   P(zero flips in 64 bits at p=0.2) = 0.8^64 ~= 6e-7
-SYNC_LEN = 256
+SYNC_LEN = 128
 
 # Fixed sync pattern (same on both channels, known to sender + receiver).
 # STRING (not list) so it matches the channel-native type and avoids the

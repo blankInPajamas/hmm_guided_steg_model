@@ -1,25 +1,38 @@
-.PHONY: all requirement train calibrate carrier bridge eval
+.PHONY: all requirement train calibrate carrier bridge eval simulate
 
-# Running `make` with no arguments creates the venv and installs requirements
+# Detect OS: Windows (Windows_NT) vs everything else
+ifeq ($(OS),Windows_NT)
+    VENV_PY  := venv/Scripts/python.exe
+    VENV_PIP := venv/Scripts/pip.exe
+    MKDIR    := if not exist venv python -m venv venv
+else
+    VENV_PY  := venv/bin/python
+    VENV_PIP := venv/bin/pip
+    MKDIR    := python3 -m venv venv
+endif
+
 all: venv requirement
 
 venv:
-	python3 -m venv venv
+	python -m venv venv
 
 requirement: venv
-	venv/bin/pip install -r requirements.txt
+	$(VENV_PIP) install -r requirements.txt
 
 train: 
-	venv/bin/python experiments/aligned_baum_welch.py
+	$(VENV_PY) experiments/aligned_baum_welch.py
 
 calibrate:
-	venv/bin/python src/phase3/pcap_calibrator.py
+	$(VENV_PY) src/phase3/pcap_calibrator.py
 
 carrier: 
-	venv/bin/python src/phase3/scapy_carrier.py
+	$(VENV_PY) src/phase3/scapy_carrier.py
 
 bridge:
-	venv/bin/python src/phase3/hmm_scapy_bridge.py
+	$(VENV_PY) src/phase3/hmm_scapy_bridge.py
 
 eval:
-	venv/bin/python src/phase3/steganalysis_eval.py
+	$(VENV_PY) src/phase3/steganalysis_eval.py
+
+simulate:
+	$(VENV_PY) src/hmm_model/simulator.py

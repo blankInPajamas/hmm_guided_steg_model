@@ -33,10 +33,14 @@ WARDEN_SCRUB_PROB = {0: 0.00, 1: 0.20, 2: 0.70}
 WARDEN_JITTER_STD = {0: 0.002, 1: 0.015, 2: 0.040}
 
 # Sync-pattern length per channel per epoch (bits).
-SYNC_LEN = 16
+# 64 gives us a reliable sync-BER estimate even at 20% scrub rates:
+#   P(zero flips in 64 bits at p=0.2) = 0.8^64 ~= 6e-7
+SYNC_LEN = 256
 
 # Fixed sync pattern (same on both channels, known to sender + receiver).
-SYNC_PATTERN = [0, 1] * (SYNC_LEN // 2)
+# STRING (not list) so it matches the channel-native type and avoids the
+# int-vs-str comparison bug that made obs always equal 2.
+SYNC_PATTERN = "01" * (SYNC_LEN // 2)
 
 # Observation thresholds (applied to worst-channel sync BER).
 OBS_THRESH_DEGRADED = 0.05
@@ -69,7 +73,7 @@ class SimulatedWarden:
         # --- Storage channel corruption --------------------------------
         received_packets = []
         for pkt in storage_packets:
-            pkt_copy = pkt.copy()
+            pkt_copy = dict(pkt)  # shallow copy; dicts are flat here
             if rng.random() < scrub_p:
                 pkt_copy["ip_id"] = rng.randint(1000, 65000)
             received_packets.append(pkt_copy)
@@ -91,6 +95,22 @@ class SimulatedWarden:
 # Receiver-side observation function (no ground truth)
 # ---------------------------------------------------------------------------
 
+def _ber(tx, rx) -> float:
+    """Bit-error rate between two bit sequences (any iterable of 0/1).
+
+    Normalizes both sides to strings so a type mismatch cannot silently
+    inflate the BER to 1.0 (which was the bug that locked obs at 2).
+    """
+    if not tx or not rx:
+        return 0.0
+    tx_s = ''.join(str(b) for b in tx)
+    rx_s = ''.join(str(b) for b in rx)
+    n = min(len(tx_s), len(rx_s))
+    if n == 0:
+        return 0.0
+    return sum(a != b for a, b in zip(tx_s[:n], rx_s[:n])) / n
+
+
 def measure_observation(sync_storage_tx, sync_storage_rx,
                         sync_timing_tx,  sync_timing_rx):
     """Derive v_t from receiver-observable sync-bit error statistics.
@@ -102,11 +122,6 @@ def measure_observation(sync_storage_tx, sync_storage_rx,
     detail : dict
         Per-channel BER, for logging / debugging.
     """
-    def _ber(tx, rx):
-        if not tx:
-            return 0.0
-        return sum(a != b for a, b in zip(tx, rx)) / len(tx)
-
     ber_storage = _ber(sync_storage_tx, sync_storage_rx)
     ber_timing = _ber(sync_timing_tx,  sync_timing_rx)
     ber_max = max(ber_storage, ber_timing)
@@ -137,7 +152,7 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
     np.random.seed(seed)
 
     print("=" * 78)
-    print(" HMM-GUIDED HYBRID NETWORK STEGANOGRAPHY — SIMULATION (v2)")
+    print(" HMM-GUIDED HYBRID NETWORK STEGANOGRAPHY — SIMULATION (v3)")
     print("=" * 78)
 
     secret_message = (
@@ -169,9 +184,15 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
             print(f"[*] Payload complete at epoch {epoch - 1}.")
             break
 
-        # --- 1. Controller decides allocation ------------------------
+        # --- 1. Controller decides allocation (using PREVIOUS belief) --
+        # Note: this is intentional. The allocation for epoch t must be
+        # decided *before* we can observe the outcome of epoch t. So the
+        # controller acts on gamma_{t-1}. The observation of epoch t then
+        # updates gamma to gamma_t, which will drive epoch t+1. This
+        # produces a one-epoch control lag, which is a real property of
+        # the protocol, not a bug.
         alpha, beta = hmm.get_allocation_ratio()
-        inferred_state = hmm.get_most_likely_state()
+        inferred_before = hmm.get_most_likely_state()
 
         # --- 2. Split payload -----------------------------------------
         storage_bits, timing_bits = splitter.fetch_next_chunk(
@@ -182,11 +203,10 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
         if not epoch_sent_bits:
             break
 
-        # --- 3. Prepend sync pattern for receiver-side observation ---
-        # The sync bits are NOT counted in the BER denominator, because
-        # they are not payload — they are a measurement aid.
-        tx_storage = list(SYNC_PATTERN) + list(storage_bits)
-        tx_timing  = list(SYNC_PATTERN) + list(timing_bits)
+        # --- 3. Prepend sync pattern for receiver-side observation ----
+        # Sync bits are NOT counted in the payload BER denominator.
+        tx_storage = SYNC_PATTERN + storage_bits
+        tx_timing  = SYNC_PATTERN + timing_bits
 
         # --- 4. Encode ------------------------------------------------
         storage_pkts = storage_ch.embed_in_ip_id(tx_storage)
@@ -201,7 +221,17 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
         rx_storage = storage_ch.extract_from_ip_id(rx_pkts)
         rx_timing  = timing_ch.decode_ipds(rx_delays)
 
-        # --- 7. Split sync from payload at the receiver --------------
+        # --- 6b. Length guards ----------------------------------------
+        if len(rx_storage) != len(tx_storage):
+            raise RuntimeError(
+                f"epoch {epoch}: storage length mismatch "
+                f"tx={len(tx_storage)} rx={len(rx_storage)}")
+        if len(rx_timing) != len(tx_timing):
+            raise RuntimeError(
+                f"epoch {epoch}: timing length mismatch "
+                f"tx={len(tx_timing)} rx={len(rx_timing)}")
+
+        # --- 7. Split sync from payload at the receiver ---------------
         sync_storage_tx = tx_storage[:SYNC_LEN]
         sync_storage_rx = rx_storage[:SYNC_LEN]
         sync_timing_tx  = tx_timing[:SYNC_LEN]
@@ -210,38 +240,31 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
         rx_storage_payload = rx_storage[SYNC_LEN:SYNC_LEN + len(storage_bits)]
         rx_timing_payload  = rx_timing[SYNC_LEN:SYNC_LEN + len(timing_bits)]
 
-        # Print sync bits for the first 3 epochs only
-        if epoch <= 3:
-            print(f"\n[DEBUG epoch {epoch}] true_state={true_state}")
-            print(f"  sync storage TX: {sync_storage_tx}")
-            print(f"  sync storage RX: {sync_storage_rx}")
-            print(f"  sync timing  TX: {sync_timing_tx}")
-            print(f"  sync timing  RX: {sync_timing_rx}")
-            print(f"  rx_storage[:20]: {rx_storage[:20]}")
-            print(f"  rx_timing[:20]:  {rx_timing[:20]}")
-            print(f"  len(rx_storage)={len(rx_storage)}  len(rx_timing)={len(rx_timing)}")
-            print(f"  len(tx_storage)={len(tx_storage)}  len(tx_timing)={len(tx_timing)}")
-            print()
-
         # --- 8. Observation for HMM (receiver-visible only) -----------
         obs, obs_detail = measure_observation(
             sync_storage_tx, sync_storage_rx,
             sync_timing_tx,  sync_timing_rx)
 
         # --- 9. BER on payload ----------------------------------------
-        storage_errors = sum(a != b for a, b in zip(storage_bits, rx_storage_payload))
-        timing_errors  = sum(a != b for a, b in zip(timing_bits,  rx_timing_payload))
+        storage_errors = sum(a != b for a, b in
+                             zip(storage_bits, rx_storage_payload))
+        timing_errors  = sum(a != b for a, b in
+                             zip(timing_bits,  rx_timing_payload))
         epoch_errors = storage_errors + timing_errors
         total_bit_errors += epoch_errors
         epoch_ber = epoch_errors / len(epoch_sent_bits)
 
-        # --- 10. Log ---------------------------------------------------
-        print(f"{epoch:<4} | {true_state:<5} | {inferred_state:<6} | "
+        # --- 10. Log --------------------------------------------------
+        print(f"{epoch:<4} | {true_state:<5} | {inferred_before:<6} | "
               f"{alpha:<6.3f} | {beta:<6.3f} | {obs:<3} | "
               f"{storage_errors:<6} | {timing_errors:<6} | {epoch_ber:<7.2%}")
 
-        # --- 11. HMM belief update -------------------------------------
+        # --- 11. HMM belief update ------------------------------------
         hmm.update_belief(obs)
+        # inferred_after is what will drive epoch t+1's allocation.
+        # Not printed here to keep the table compact, but available if
+        # you want to inspect the lag: uncomment the next line.
+        # print(f"     [belief after obs] inferred={hmm.get_most_likely_state()}")
 
     # --- Summary --------------------------------------------------------
     overall_ber = (total_bit_errors / total_bits_sent

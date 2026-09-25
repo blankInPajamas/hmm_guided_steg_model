@@ -13,55 +13,64 @@ An adaptive, closed-loop covert communication protocol that combines Layer 3/4 s
 ## Repository & Project Architecture
 
 ```text
+
 .
 ├── context.md
 ├── docs
-│   └── dataset.md
+│   └── dataset.md
 ├── experiments
-│   ├── aligned_baum_welch.py
-│   ├── baum_welch.py
-│   └── sweep_exp.py
+│   ├── aligned_baum_welch.py
+│   ├── baum_welch.py
+│   └── sweep_exp.py
 ├── Makefile
 ├── publication_figure.py
 ├── README.md
 ├── requirements.txt
 ├── results
-│   ├── aligned_hmm_output
-│   │   ├── learned_hmm_metrics.csv
-│   │   └── learned_hmm_model.json
-│   ├── hmm_scapy_bridge
-│   │   └── scapy_hmm_results.csv
-│   ├── learned_hmm_output
-│   │   ├── learned_hmm_metrics.csv
-│   │   └── learned_hmm_model.json
-│   ├── mawi_ipd
-│   │   ├── mawi_ipd_distribution.png
-│   │   └── mawi_ipd_profile.json
-│   ├── mininet
-│   │   ├── baseline_comparison_summary.csv
-│   │   ├── pure_alpha.csv
-│   │   ├── pure_beta.csv
-│   │   ├── scapy_hmm_results.csv
-│   │   ├── split_alpha_beta.csv
-│   │   └── steganalysis_report.md
-│   ├── plots
-│   │   ├── ber_goodput_comparison.png
-│   │   └── epoch_adaptation_trace.png
-│   ├── steganalysis_report
-│   │   └── steganalysis_report.md
-│   └── sweep_output
-│       └── sweep_results.csv
+│   ├── aligned_hmm_output
+│   │   ├── learned_hmm_metrics.csv
+│   │   └── learned_hmm_model.json
+│   ├── hmm_scapy_bridge
+│   │   └── scapy_hmm_results.csv
+│   ├── learned_hmm_output
+│   │   ├── learned_hmm_metrics.csv
+│   │   └── learned_hmm_model.json
+│   ├── mawi_ipd
+│   │   ├── mawi_ipd_distribution.png
+│   │   └── mawi_ipd_profile.json
+│   ├── mininet
+│   │   ├── baseline_comparison_summary.csv
+│   │   ├── pure_alpha.csv
+│   │   ├── pure_beta.csv
+│   │   ├── scapy_hmm_results.csv
+│   │   ├── split_alpha_beta.csv
+│   │   └── steganalysis_report.md
+│   ├── plots
+│   │   ├── ber_goodput_comparison.png
+│   │   └── epoch_adaptation_trace.png
+│   ├── simulator_results
+│   │   ├── res001.log
+│   │   ├── res002.log
+│   │   └── res003.log
+│   ├── steganalysis_report
+│   │   └── steganalysis_report.md
+│   └── sweep_output
+│       └── sweep_results.csv
 └── src
     ├── hmm_model
-    │   ├── channels.py
-    │   ├── hmm_engine.py
-    │   ├── simulator.py
-    │   └── splitter.py
+    │   ├── channels.py
+    │   ├── hmm_engine.py
+    │   ├── simulator.py
+    │   └── splitter.py
+    ├── mininet
+    │   ├── live_warden.py
+    │   └── mininet_topo.py
     └── phase3
         ├── hmm_scapy_bridge.py
         ├── pcap_calibrator.py
         ├── scapy_carrier.py
         └── steganalysis_eval.py
+
 ```
 
 ---

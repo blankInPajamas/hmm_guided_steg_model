@@ -35,7 +35,7 @@ RATIO_MAP = {
 
 
 class HMMEngine:
-    def __init__(self, A=None, B=None, pi=None, model_path=None):
+    def __init__(self, A=None, B=None, pi=None, model_path=None, use_uniform_prior=False):
         """
         Priority of sources:
           1. Explicit A/B/pi passed as arguments.
@@ -43,6 +43,7 @@ class HMMEngine:
           3. Hard-coded defaults (with a warning).
         """
         self.ratio_map = dict(RATIO_MAP)
+
 
         if A is not None and B is not None and pi is not None:
             self.A = np.asarray(A, dtype=float)
@@ -73,6 +74,11 @@ class HMMEngine:
 
         self.num_states = len(self.pi)
         self.num_obs = self.B.shape[1]
+        
+        if use_uniform_prior:
+            self.current_belief = np.ones(self.num_states) / self.num_states
+        else:
+            self.current_belief = self.pi.copy()
 
         self.current_belief = self.pi.copy()
 

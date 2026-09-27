@@ -166,7 +166,7 @@ def run_simulation(warden_schedule=None, chunk_size=64, seed=42):
         "EVADING_SOTA_ACTIVE_WARDEN_VIA_DYNAMIC_STORAGE_TIMING_RATIO_ALLOCATION"
     )
 
-    hmm = HMMEngine()
+    hmm = HMMEngine(use_uniform_prior=True)
     splitter = PayloadSplitter(secret_message)
     storage_ch = StorageChannel()
     timing_ch = TimingChannel()

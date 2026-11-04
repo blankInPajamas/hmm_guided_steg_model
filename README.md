@@ -1,5 +1,7 @@
 # HMM-Guided Hybrid Network Steganography
 
+**Supervisor:** Md. Shohrab Hossain, BUET
+
 An adaptive, closed-loop covert communication protocol that combines Layer 3/4
 storage channels with Layer 4 timing channels, driven by an unsupervised
 Hidden Markov Model (HMM) decision controller to evade active network wardens
